@@ -1,0 +1,7 @@
+node_modules/
+frontend/build/
+frontend/node_modules/
+*.zip
+.env
+__pycache__/
+.DS_Store
