@@ -467,3 +467,133 @@ body {
   color: var(--text-secondary);
   font-family: var(--font-mono);
 }
+
+/* ─── Timeline ─── */
+.timeline { position: relative; padding-left: 0; }
+
+.timeline-day { margin-bottom: 32px; }
+
+.timeline-date-header {
+  margin-bottom: 16px;
+  margin-left: 44px;
+}
+.timeline-date-badge {
+  display: inline-block;
+  padding: 6px 16px;
+  background: var(--accent-dim);
+  border: 1px solid rgba(249, 115, 22, 0.3);
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+.timeline-event {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 4px;
+}
+
+.timeline-connector {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 28px;
+  flex-shrink: 0;
+}
+
+.timeline-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 18px;
+}
+
+.timeline-line {
+  width: 2px;
+  flex: 1;
+  background: var(--border);
+  min-height: 20px;
+}
+
+.timeline-event:last-child .timeline-line { display: none; }
+
+.timeline-card {
+  flex: 1;
+  margin-bottom: 8px;
+  padding: 16px 20px !important;
+}
+
+/* ─── MITRE ATT&CK ─── */
+.mitre-chain {
+  display: flex;
+  gap: 8px;
+  min-width: max-content;
+  padding-bottom: 8px;
+}
+
+.mitre-tactic-cell {
+  min-width: 120px;
+  max-width: 160px;
+  flex-shrink: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  opacity: 0.4;
+  transition: opacity 0.2s;
+}
+.mitre-tactic-cell.active {
+  opacity: 1;
+  border-color: rgba(249, 115, 22, 0.3);
+}
+
+.mitre-tactic-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mitre-tactic-name {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.mitre-tactic-count {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mitre-technique-chip {
+  padding: 6px 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mitre-technique-chip:hover {
+  background: var(--bg-card-hover);
+  border-color: rgba(249, 115, 22, 0.4);
+}

@@ -9,6 +9,8 @@ from boto3.dynamodb.conditions import Key, Attr
 dynamodb = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1"))
 findings_table = dynamodb.Table(os.environ.get("FINDINGS_TABLE", "SitRepFindings"))
 notes_table = dynamodb.Table(os.environ.get("NOTES_TABLE", "SitRepNotes"))
+timeline_table = dynamodb.Table(os.environ.get("TIMELINE_TABLE", "SitRepTimeline"))
+mitre_table = dynamodb.Table(os.environ.get("MITRE_TABLE", "SitRepMitre"))
 
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -64,6 +66,34 @@ def lambda_handler(event, context):
             return get_note(path.split("/")[-1])
         if path.startswith("/api/notes/") and method == "DELETE":
             return delete_note(path.split("/")[-1])
+
+        # ── Challenges (aggregated view) ──
+        if path == "/api/challenges" and method == "GET":
+            return get_challenges()
+
+        # ── Timeline ──
+        if path == "/api/timeline" and method == "GET":
+            return get_timeline_events(qs)
+        if path == "/api/timeline" and method == "POST":
+            return create_timeline_event(body)
+        if path.startswith("/api/timeline/") and method == "GET":
+            return get_timeline_event(path.split("/")[-1])
+        if path.startswith("/api/timeline/") and method == "PUT":
+            return update_timeline_event(path.split("/")[-1], body)
+        if path.startswith("/api/timeline/") and method == "DELETE":
+            return delete_timeline_event(path.split("/")[-1])
+
+        # ── MITRE ATT&CK ──
+        if path == "/api/mitre" and method == "GET":
+            return get_mitre_mappings(qs)
+        if path == "/api/mitre" and method == "POST":
+            return create_mitre_mapping(body)
+        if path.startswith("/api/mitre/") and method == "GET":
+            return get_mitre_mapping(path.split("/")[-1])
+        if path.startswith("/api/mitre/") and method == "PUT":
+            return update_mitre_mapping(path.split("/")[-1], body)
+        if path.startswith("/api/mitre/") and method == "DELETE":
+            return delete_mitre_mapping(path.split("/")[-1])
 
         # ── Search ──
         if path == "/api/search" and method == "GET":
@@ -242,6 +272,273 @@ def delete_note(note_id):
     return respond(200, {"message": "Note deleted"})
 
 
+# ────────────────────────── Challenges ──────────────────────────
+
+
+def get_challenges():
+    """Aggregate findings and notes into a per-challenge view."""
+    findings = findings_table.scan()["Items"]
+    notes = notes_table.scan()["Items"]
+
+    challenges = {}
+    for f in findings:
+        name = f.get("challenge_name", "Unknown")
+        if name not in challenges:
+            challenges[name] = {
+                "challenge_name": name,
+                "categories": set(),
+                "flags": [],
+                "findings_count": 0,
+                "notes_count": 0,
+                "agents": set(),
+                "status": "investigating",
+                "key_findings": [],
+            }
+        ch = challenges[name]
+        ch["findings_count"] += 1
+        ch["categories"].add(f.get("category", "general"))
+        ch["agents"].add(f.get("agent_id", ""))
+        if f.get("finding_type") == "flag":
+            ch["flags"].append({
+                "title": f.get("title", ""),
+                "content": f.get("content", ""),
+                "agent_id": f.get("agent_id", ""),
+                "timestamp": f.get("timestamp", 0),
+            })
+            ch["status"] = "solved"
+        ch["key_findings"].append({
+            "id": f.get("id"),
+            "title": f.get("title", ""),
+            "finding_type": f.get("finding_type", ""),
+            "status": f.get("status", ""),
+            "content": f.get("content", "")[:200],
+        })
+
+    for n in notes:
+        name = n.get("challenge_name", "Unknown")
+        if name not in challenges:
+            challenges[name] = {
+                "challenge_name": name,
+                "categories": set(),
+                "flags": [],
+                "findings_count": 0,
+                "notes_count": 0,
+                "agents": set(),
+                "status": "investigating",
+                "key_findings": [],
+            }
+        ch = challenges[name]
+        ch["notes_count"] += 1
+        ch["agents"].add(n.get("agent_id", ""))
+        if n.get("flag_found"):
+            ch["flags"].append({
+                "flag": n["flag_found"],
+                "title": n.get("title", ""),
+                "methodology": n.get("methodology", ""),
+                "query_path": n.get("query_path", []),
+                "tools_used": n.get("tools_used", []),
+                "agent_id": n.get("agent_id", ""),
+                "timestamp": n.get("timestamp", 0),
+            })
+            ch["status"] = "solved"
+
+    # Convert sets to lists for JSON serialization
+    result = []
+    for ch in challenges.values():
+        ch["categories"] = sorted(list(ch["categories"]))
+        ch["agents"] = sorted(list(ch["agents"]))
+        result.append(ch)
+
+    result.sort(key=lambda x: x["challenge_name"])
+    return respond(200, {"challenges": result, "count": len(result)})
+
+
+# ────────────────────────── Timeline ──────────────────────────
+
+
+def get_timeline_events(qs):
+    params = {}
+    filter_expressions = []
+
+    if qs.get("challenge"):
+        filter_expressions.append(Attr("challenge_name").eq(qs["challenge"]))
+    if qs.get("event_type"):
+        filter_expressions.append(Attr("event_type").eq(qs["event_type"]))
+
+    if filter_expressions:
+        combined = filter_expressions[0]
+        for f in filter_expressions[1:]:
+            combined = combined & f
+        params["FilterExpression"] = combined
+
+    result = timeline_table.scan(**params)
+    items = sorted(result["Items"], key=lambda x: x.get("event_time", ""), reverse=False)
+    return respond(200, {"events": items, "count": len(items)})
+
+
+def create_timeline_event(body):
+    required = ["title", "event_time"]
+    for field in required:
+        if field not in body:
+            return respond(400, {"error": f"Missing required field: {field}"})
+
+    item = {
+        "id": str(uuid.uuid4()),
+        "title": body["title"],
+        "description": body.get("description", ""),
+        "event_time": body["event_time"],
+        "event_type": body.get("event_type", "incident"),
+        "severity": body.get("severity", "medium"),
+        "challenge_name": body.get("challenge_name", ""),
+        "agent_id": body.get("agent_id", ""),
+        "source": body.get("source", ""),
+        "artifacts": body.get("artifacts", []),
+        "related_finding_ids": body.get("related_finding_ids", []),
+        "mitre_technique_ids": body.get("mitre_technique_ids", []),
+        "tags": body.get("tags", []),
+        "timestamp": int(time.time()),
+    }
+    timeline_table.put_item(Item=item)
+    return respond(201, {"event": item})
+
+
+def get_timeline_event(event_id):
+    result = timeline_table.get_item(Key={"id": event_id})
+    item = result.get("Item")
+    if not item:
+        return respond(404, {"error": "Timeline event not found"})
+    return respond(200, {"event": item})
+
+
+def update_timeline_event(event_id, body):
+    update_expr_parts = []
+    expr_values = {}
+    expr_names = {}
+
+    allowed = [
+        "title", "description", "event_time", "event_type", "severity",
+        "challenge_name", "source", "artifacts", "related_finding_ids",
+        "mitre_technique_ids", "tags",
+    ]
+    for field in allowed:
+        if field in body:
+            safe_name = f"#{field}"
+            safe_val = f":{field}"
+            update_expr_parts.append(f"{safe_name} = {safe_val}")
+            expr_names[safe_name] = field
+            expr_values[safe_val] = body[field]
+
+    if not update_expr_parts:
+        return respond(400, {"error": "No fields to update"})
+
+    result = timeline_table.update_item(
+        Key={"id": event_id},
+        UpdateExpression="SET " + ", ".join(update_expr_parts),
+        ExpressionAttributeNames=expr_names,
+        ExpressionAttributeValues=expr_values,
+        ReturnValues="ALL_NEW",
+    )
+    return respond(200, {"event": result["Attributes"]})
+
+
+def delete_timeline_event(event_id):
+    timeline_table.delete_item(Key={"id": event_id})
+    return respond(200, {"message": "Timeline event deleted"})
+
+
+# ────────────────────────── MITRE ATT&CK ──────────────────────────
+
+
+def get_mitre_mappings(qs):
+    params = {}
+    filter_expressions = []
+
+    if qs.get("tactic"):
+        filter_expressions.append(Attr("tactic").eq(qs["tactic"]))
+    if qs.get("challenge"):
+        filter_expressions.append(Attr("challenge_name").eq(qs["challenge"]))
+
+    if filter_expressions:
+        combined = filter_expressions[0]
+        for f in filter_expressions[1:]:
+            combined = combined & f
+        params["FilterExpression"] = combined
+
+    result = mitre_table.scan(**params)
+    items = sorted(result["Items"], key=lambda x: x.get("tactic", ""))
+    return respond(200, {"mappings": items, "count": len(items)})
+
+
+def create_mitre_mapping(body):
+    required = ["technique_id", "technique_name", "tactic"]
+    for field in required:
+        if field not in body:
+            return respond(400, {"error": f"Missing required field: {field}"})
+
+    item = {
+        "id": str(uuid.uuid4()),
+        "technique_id": body["technique_id"],
+        "technique_name": body["technique_name"],
+        "tactic": body["tactic"],
+        "sub_technique_id": body.get("sub_technique_id", ""),
+        "sub_technique_name": body.get("sub_technique_name", ""),
+        "description": body.get("description", ""),
+        "observed_evidence": body.get("observed_evidence", ""),
+        "challenge_name": body.get("challenge_name", ""),
+        "agent_id": body.get("agent_id", ""),
+        "related_finding_ids": body.get("related_finding_ids", []),
+        "confidence": body.get("confidence", "medium"),
+        "tags": body.get("tags", []),
+        "timestamp": int(time.time()),
+    }
+    mitre_table.put_item(Item=item)
+    return respond(201, {"mapping": item})
+
+
+def get_mitre_mapping(mapping_id):
+    result = mitre_table.get_item(Key={"id": mapping_id})
+    item = result.get("Item")
+    if not item:
+        return respond(404, {"error": "MITRE mapping not found"})
+    return respond(200, {"mapping": item})
+
+
+def update_mitre_mapping(mapping_id, body):
+    update_expr_parts = []
+    expr_values = {}
+    expr_names = {}
+
+    allowed = [
+        "technique_id", "technique_name", "tactic", "sub_technique_id",
+        "sub_technique_name", "description", "observed_evidence",
+        "challenge_name", "related_finding_ids", "confidence", "tags",
+    ]
+    for field in allowed:
+        if field in body:
+            safe_name = f"#{field}"
+            safe_val = f":{field}"
+            update_expr_parts.append(f"{safe_name} = {safe_val}")
+            expr_names[safe_name] = field
+            expr_values[safe_val] = body[field]
+
+    if not update_expr_parts:
+        return respond(400, {"error": "No fields to update"})
+
+    result = mitre_table.update_item(
+        Key={"id": mapping_id},
+        UpdateExpression="SET " + ", ".join(update_expr_parts),
+        ExpressionAttributeNames=expr_names,
+        ExpressionAttributeValues=expr_values,
+        ReturnValues="ALL_NEW",
+    )
+    return respond(200, {"mapping": result["Attributes"]})
+
+
+def delete_mitre_mapping(mapping_id):
+    mitre_table.delete_item(Key={"id": mapping_id})
+    return respond(200, {"message": "MITRE mapping deleted"})
+
+
 # ────────────────────────── Search ──────────────────────────
 
 
@@ -405,12 +702,43 @@ POST /api/notes
     "artifacts": ["decoded_payload.bin", "filtered_dns.csv"]
 }
 
-### 4. Update Findings as You Learn More
+### 4. Log Timeline Events
+POST /api/timeline
+{
+    "title": "Malicious DNS queries begin",
+    "event_time": "2025-03-15T14:30:00Z",
+    "event_type": "initial_access|execution|persistence|exfiltration|lateral_movement|discovery|c2|impact|detection|response",
+    "description": "First observed DNS TXT queries to C2 domain",
+    "severity": "high",
+    "challenge_name": "Name of the CTF challenge",
+    "agent_id": "your-unique-agent-id",
+    "source": "pcap analysis",
+    "mitre_technique_ids": ["T1071.004"]
+}
+
+### 5. Map to MITRE ATT&CK
+POST /api/mitre
+{
+    "technique_id": "T1071",
+    "technique_name": "Application Layer Protocol",
+    "tactic": "command-and-control",
+    "sub_technique_id": "T1071.004",
+    "sub_technique_name": "DNS",
+    "description": "Attacker used DNS TXT records for C2 communication",
+    "observed_evidence": "DNS queries to evil.example.com with base64 TXT responses",
+    "challenge_name": "Name of the CTF challenge",
+    "confidence": "high|medium|low"
+}
+
+### 6. Update Findings as You Learn More
 PUT /api/findings/{id}
 { "status": "confirmed", "content": "Updated with new evidence..." }
 
-### 5. Search Across All Data
+### 7. Search Across All Data
 GET /api/search?q=search_term
+
+### 8. View Challenges Summary
+GET /api/challenges — aggregated view of all challenges with flags and solve status
 
 ## Best Practices
 1. Use a consistent agent_id across all your submissions
@@ -434,6 +762,17 @@ API_REFERENCE = {
         {"method": "POST", "path": "/api/notes", "description": "Create a new investigation note"},
         {"method": "GET", "path": "/api/notes/{id}", "description": "Get a specific note"},
         {"method": "DELETE", "path": "/api/notes/{id}", "description": "Delete a note"},
+        {"method": "GET", "path": "/api/challenges", "description": "Aggregated challenge view with flags, agents, solve status"},
+        {"method": "GET", "path": "/api/timeline", "params": "challenge, event_type", "description": "List timeline events"},
+        {"method": "POST", "path": "/api/timeline", "description": "Create a timeline event"},
+        {"method": "GET", "path": "/api/timeline/{id}", "description": "Get a specific timeline event"},
+        {"method": "PUT", "path": "/api/timeline/{id}", "description": "Update a timeline event"},
+        {"method": "DELETE", "path": "/api/timeline/{id}", "description": "Delete a timeline event"},
+        {"method": "GET", "path": "/api/mitre", "params": "tactic, challenge", "description": "List MITRE ATT&CK mappings"},
+        {"method": "POST", "path": "/api/mitre", "description": "Create a MITRE ATT&CK mapping"},
+        {"method": "GET", "path": "/api/mitre/{id}", "description": "Get a specific MITRE mapping"},
+        {"method": "PUT", "path": "/api/mitre/{id}", "description": "Update a MITRE mapping"},
+        {"method": "DELETE", "path": "/api/mitre/{id}", "description": "Delete a MITRE mapping"},
         {"method": "GET", "path": "/api/search?q=term", "description": "Full-text search across findings and notes"},
         {"method": "GET", "path": "/api/stats", "description": "Dashboard statistics"},
         {"method": "GET", "path": "/api/agent-prompt", "description": "Get the agent system prompt and API reference"},
